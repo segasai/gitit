@@ -269,7 +269,7 @@ isDiscussPageFile _ = False
 isSourceCode :: String -> Bool
 isSourceCode path' =
   let langs = languagesByFilename $ takeFileName path'
-  ext = takeExtension path'
+      ext = takeExtension path'
   in not (null langs || ext == ".svg" || ext == ".eps")
       -- allow svg or eps to be served as image 
 
