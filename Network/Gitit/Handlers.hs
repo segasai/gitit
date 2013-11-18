@@ -59,7 +59,7 @@ import Network.Gitit.Layout
 import Network.Gitit.Types
 import Network.Gitit.Feed (filestoreToXmlFeed, FeedConfig(..))
 import Network.Gitit.Util (orIfNull)
-import Network.Gitit.Cache (expireCachedFile, lookupCache, cacheContents)
+import Network.Gitit.Cache (expireCachedFile, cacheContents, lookupCache)
 import Network.Gitit.ContentTransformer (showRawPage, showFileAsText, showPage,
         exportPage, showHighlightedSource, preview, applyPreCommitPlugins)
 import Network.Gitit.Page (readCategories)
@@ -392,14 +392,15 @@ showActivity = withData $ \(params :: Params) -> do
   let fileFromChange (Added f)    = f
       fileFromChange (Modified f) = f
       fileFromChange (Deleted f)  = f
-  let dropDotPage file = if isPageFile file
-                            then dropExtension file
-                            else file
+
   base' <- getWikiBase
   let fileAnchor revis file =
         anchor ! [href $ base' ++ "/_diff" ++ urlForPage file ++ "?to=" ++ revis] << file
-  let filesFor changes revis = intersperse (primHtmlChar "nbsp") $
-        map (fileAnchor revis . dropDotPage . fileFromChange) changes
+  let fileAnchor revis file = if isPageFile file
+        then anchor ! [href $ base' ++ "/_diff" ++ urlForPage(dropExtension(file)) ++ "?to=" ++ revis] << dropExtension file
+        else anchor ! [href $ base' ++ urlForPage file ] << file
+  let filesFor changes revis = intersperse (stringToHtml " ") $
+        map (fileAnchor revis . fileFromChange) changes
   let heading = h1 << ("Recent changes by " ++ fromMaybe "all users" forUser)
   let revToListItem rev = li <<
         [ thespan ! [theclass "date"] << (show $ revDateTime rev)
