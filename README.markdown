@@ -6,11 +6,11 @@ the web server and [pandoc][] for markup processing. Pages and uploaded
 files are stored in a [git][], [darcs][], or [mercurial][] repository
 and may be modified either by using the VCS's command-line tools or
 through the wiki's web interface. By default, pandoc's extended version
-of markdown is used as a markup language, but reStructuredText, LaTeX,
-or HTML can also be used. Pages can be exported in a number of different
-formats, including LaTeX, RTF, OpenOffice ODT, and MediaWiki markup.
-Gitit can be configured to display TeX math (using [texmath][]) and
-highlighted source code (using [highlighting-kate][]).
+of markdown is used as a markup language, but reStructuredText, LaTeX, HTML,
+DocBook, or Emacs Org-mode markup can also be used. Pages can be exported in a
+number of different formats, including LaTeX, RTF, OpenOffice ODT, and
+MediaWiki markup.  Gitit can be configured to display TeX math (using
+[texmath][]) and highlighted source code (using [highlighting-kate][]).
 
 Other features include
 
@@ -221,6 +221,13 @@ Use the option `-f [filename]` to specify a configuration file:
 
     gitit -f my.conf
 
+The configuation can be splitted between several files:
+
+	gitit -f my.conf additional.conf
+
+One use case is to keep sensible part of the configuration outside of a SCM
+(oauth client secret for example).
+
 If this option is not used, gitit will use a default configuration.
 To get a copy of the default configuration file, which you
 can customize, just type:
@@ -345,13 +352,46 @@ knowing the answer to the access question.
 Another approach is to use HTTP authentication. (See the config file comments on
 `authentication-method`.)
 
+Authentication through github
+-----------------------------
+
+If you want to authenticate the user from github through oauth2, you need to
+register your app with github to obtain a OAuth client secret and add the
+following section to your configuration file:
+
+```
+[Github]
+oauthclientid: 01239456789abcdef012
+oauthclientsecret: 01239456789abcdef01239456789abcdef012394
+oauthcallback: http://mysite/_githubCallback
+oauthoauthorizeendpoint: https://github.com/login/oauth/authorize
+oauthaccesstokenendpoint: https://github.com/login/oauth/access_token
+## Uncomment if you are checking membership against an organization and change
+## gitit-testorg to this organization:
+# github-org: gitit-testorg
+```
+
+The github authentication uses the scope `user:email`. This way, gitit gets the
+email of the user, and the commit can be assigned to the right author if the
+wikidata repository is pushed to github. Additionally, it uses `read:org` if you
+uses the option `github-org` to check membership against an organization.
+
+To push your repository to gitub after each commit, you can add the file
+`post-commit` with the content below in the .git/hooks directory of your
+wikidata repository.
+
+```
+#!/bin/sh
+git push origin master 2>> logit
+```
+
 Plugins
 =======
 
 Plugins are small Haskell programs that transform a wiki page after it
-has been converted from Markdown or RST. See the example plugins in the
-`plugins` directory. To enable a plugin, include the path to the plugin
-(or its module name) in the `plugins` field of the configuration file.
+has been converted from Markdown or another source format. See the example
+plugins in the `plugins` directory. To enable a plugin, include the path to the
+plugin (or its module name) in the `plugins` field of the configuration file.
 (If the plugin name starts with `Network.Gitit.Plugin.`, gitit will assume that
 the plugin is an installed module and will not look for a source file.)
 
@@ -452,7 +492,7 @@ Proxying to `http://wiki.mysite.com`
 ------------------------------------
 
 Set up your DNS so that `http://wiki.mysite.com` maps to
-your server's IP address. Make sure that the `mod_proxy` module is
+your server's IP address. Make sure that the `mod_proxy`, `mod_proxy_http` and `mod_rewrite` modules are
 loaded, and set up a virtual host with the following configuration:
 
     <VirtualHost *>
@@ -545,6 +585,7 @@ Now add the following lines to the apache configuration file for the
       SetOutputFilter  proxy-html
       ProxyPassReverse /
       ProxyHTMLURLMap  /   /wiki/
+      ProxyHTMLDocType "<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.0 Strict//EN' 'http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd'>" XHTML
       RequestHeader unset Accept-Encoding
     </Location>
 

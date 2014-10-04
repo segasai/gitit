@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables, StandaloneDeriving #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-
 Copyright (C) 2009 John MacFarlane <jgm@berkeley.edu>,
                    Henry Laxen <nadine.and.henry@pobox.com>
@@ -24,7 +24,8 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 module Network.Gitit.Authentication ( loginUserForm
                                     , formAuthHandlers
                                     , httpAuthHandlers
-                                    , rpxAuthHandlers) where
+                                    , rpxAuthHandlers
+                                    , githubAuthHandlers) where
 
 import Network.Gitit.State
 import Network.Gitit.Types
@@ -32,19 +33,20 @@ import Network.Gitit.Framework
 import Network.Gitit.Layout
 import Network.Gitit.Server
 import Network.Gitit.Util
+import Network.Gitit.Authentication.Github
 import Network.Captcha.ReCaptcha (captchaFields, validateCaptcha)
 import Text.XHtml hiding ( (</>), dir, method, password, rev )
 import qualified Text.XHtml as X ( password )
 import System.Process (readProcessWithExitCode)
 import Control.Monad (unless, liftM, mplus)
-import Control.Monad.Trans (MonadIO(), liftIO)
+import Control.Monad.Trans (liftIO)
 import System.Exit
 import System.Log.Logger (logM, Priority(..))
-import Data.Char (isAlphaNum, isAlpha, isAscii)
+import Data.Char (isAlphaNum, isAlpha)
 import qualified Data.Map as M
 import Text.Pandoc.Shared (substitute)
 import Data.Maybe (isJust, fromJust, isNothing, fromMaybe)
-import Network.URL (encString, exportURL, add_param, importURL)
+import Network.URL (exportURL, add_param, importURL)
 import Network.BSD (getHostName)
 import qualified Text.StringTemplate as T
 import Network.HTTP (urlEncodeVars, urlDecode, urlEncode)
@@ -77,7 +79,7 @@ registerUser params = do
 resetPasswordRequestForm :: Params -> Handler
 resetPasswordRequestForm _ = do
   let passwordForm = gui "" ! [identifier "resetPassword"] << fieldset <<
-              [ label << "Username: "
+              [ label ! [thefor "username"] << "Username: "
               , textfield "username" ! [size "20", intAttr "tabindex" 1], stringToHtml " "
               , submit "resetPassword" "Reset Password" ! [intAttr "tabindex" 2]]
   cfg <- getConfig
@@ -215,9 +217,11 @@ sharedForm mbUser = withData $ \params -> do
   dest <- case pDestination params of
                 ""  -> getReferer
                 x   -> return x
-  let accessQ = case accessQuestion cfg of
+  let accessQ = case mbUser of
+            Just _ -> noHtml
+            Nothing -> case accessQuestion cfg of
                       Nothing          -> noHtml
-                      Just (prompt, _) -> label << prompt +++ br +++
+                      Just (prompt, _) -> label ! [thefor "accessCode"] << prompt +++ br +++
                                           X.password "accessCode" ! [size "15", intAttr "tabindex" 1]
                                           +++ br
   let captcha = if useRecaptcha cfg
@@ -227,12 +231,13 @@ sharedForm mbUser = withData $ \params -> do
                       Nothing    -> ""
                       Just user  -> field user
   let userNameField = case mbUser of
-                      Nothing    -> label <<
+                      Nothing    -> label ! [thefor "username"] <<
                                      "Username (at least 3 letters or digits):"
                                     +++ br +++
                                     textfield "username" ! [size "20", intAttr "tabindex" 2] +++ br
-                      Just user  -> label << ("Username (cannot be changed): "
-                                               ++ uUsername user) +++ br
+                      Just user  -> label ! [thefor "username"] <<
+                                    ("Username (cannot be changed): " ++ uUsername user)
+                                    +++ br
   let submitField = case mbUser of
                       Nothing    -> submit "register" "Register"
                       Just _     -> submit "resetPassword" "Reset Password"
@@ -240,17 +245,18 @@ sharedForm mbUser = withData $ \params -> do
   return $ gui "" ! [identifier "loginForm"] << fieldset <<
             [ accessQ
             , userNameField
-            , label << "Email (optional, will not be displayed on the Wiki):"
+            , label ! [thefor "email"] << "Email (optional, will not be displayed on the Wiki):"
             , br
             , textfield "email" ! [size "20", intAttr "tabindex" 3, value (initField uEmail)], br
             , textfield "full_name_1" ! [size "20", theclass "req"]
-            , label << ("Password (at least 6 characters," ++
+            , label ! [thefor "password"]
+                    << ("Password (at least 6 characters," ++
                         " including at least one non-letter):")
             , br
             , X.password "password" ! [size "20", intAttr "tabindex" 4]
             , stringToHtml " "
             , br
-            , label << "Confirm Password:"
+            , label ! [thefor "password2"] << "Confirm Password:"
             , br
             , X.password "password2" ! [size "20", intAttr "tabindex" 5]
             , stringToHtml " "
@@ -279,9 +285,11 @@ sharedValidation validationType params = do
   let optionalTests Register =
           [(taken, "Sorry, that username is already taken.")]
       optionalTests ResetPassword = []
-  let isValidAccessCode = case accessQuestion cfg of
-        Nothing           -> True
-        Just (_, answers) -> accessCode `elem` answers
+  let isValidAccessCode = case validationType of
+        ResetPassword -> True
+        Register -> case accessQuestion cfg of
+            Nothing           -> True
+            Just (_, answers) -> accessCode `elem` answers
   let isValidEmail e = length (filter (=='@') e) == 1
   peer <- liftM (fst . rqPeer) askRq
   captchaResult <-
@@ -292,11 +300,8 @@ sharedValidation validationType params = do
                then return $ Left "missing-challenge-or-response"
                else liftIO $ do
                       mbIPaddr <- lookupIPAddr peer
-                      let ipaddr = case mbIPaddr of
-                                        Just ip -> ip
-                                        Nothing -> error $
-                                          "Could not find ip address for " ++
-                                          peer
+                      let ipaddr = fromMaybe (error $ "Could not find ip address for " ++ peer)
+                                   mbIPaddr
                       ipaddr `seq` validateCaptcha (recaptchaPrivateKey cfg)
                               ipaddr (recaptchaChallengeField recaptcha)
                               (recaptchaResponseField recaptcha)
@@ -332,10 +337,10 @@ loginForm dest = do
   base' <- getWikiBase
   return $ gui (base' ++ "/_login") ! [identifier "loginForm"] <<
     fieldset <<
-      [ label << "Username "
+      [ label ! [thefor "username"] << "Username "
       , textfield "username" ! [size "15", intAttr "tabindex" 1]
       , stringToHtml " "
-      , label << "Password "
+      , label ! [thefor "password"] << "Password "
       , X.password "password" ! [size "15", intAttr "tabindex" 2]
       , stringToHtml " "
       , textfield "destination" ! [thestyle "display: none;", value dest]
@@ -373,14 +378,11 @@ loginUser params = do
   cfg <- getConfig
   if allowed
     then do
-      key <- newSession (SessionData uname)
+      key <- newSession (sessionData uname)
       addCookie (MaxAge $ sessionTimeout cfg) (mkCookie "sid" (show key))
       seeOther (encUrl destination) $ toResponse $ p << ("Welcome, " ++ uname)
     else
       withMessages ["Invalid username or password."] loginUserForm
-
-encUrl :: String -> String
-encUrl = encString True isAscii
 
 logoutUser :: Params -> Handler
 logoutUser params = do
@@ -428,8 +430,43 @@ logoutUserHTTP = unauthorized $ toResponse ()  -- will this work?
 
 httpAuthHandlers :: [Handler]
 httpAuthHandlers =
-  [ dir "_logout" $ logoutUserHTTP
+  [ dir "_logout" logoutUserHTTP
   , dir "_login"  $ withData loginUserHTTP
+  , dir "_user" currentUser ]
+
+oauthGithubCallback :: GithubConfig
+                   -> GithubCallbackPars                  -- ^ Authentication code gained after authorization
+                   -> Handler
+oauthGithubCallback ghConfig githubCallbackPars =
+  withData $ \(sk :: Maybe SessionKey) ->
+      do
+        mbSd <- maybe (return Nothing) getSession sk
+        mbGititState <- case mbSd of
+                          Nothing    -> return Nothing
+                          Just sd    -> return $ sessionGithubState sd
+        let gititState = fromMaybe (error "No Github state found in session (is it the same domain?)") mbGititState
+        mUser <- getGithubUser ghConfig githubCallbackPars gititState
+        base' <- getWikiBase
+        let destination = base' ++ "/"
+        case mUser of
+          Right user -> do
+                     let userEmail = uEmail user
+                     updateGititState $ \s -> s { users = M.insert userEmail user (users s) }
+                     addUser (uUsername user) user
+                     key <- newSession (sessionData userEmail)
+                     cfg <- getConfig
+                     addCookie (MaxAge $ sessionTimeout cfg) (mkCookie "sid" (show key))
+                     seeOther (encUrl destination) $ toResponse ()
+          Left err -> do
+              liftIO $ logM "gitit" WARNING $ "Login Failed: " ++ err
+              seeOther (encUrl destination) $ toResponse $ p << "Login Failed"
+
+githubAuthHandlers :: GithubConfig
+                   -> [Handler]
+githubAuthHandlers ghConfig =
+  [ dir "_logout" $ withData logoutUser
+  , dir "_login" $ loginGithubUser $ oAuth2 ghConfig
+  , dir "_githubCallback" $ withData $ oauthGithubCallback ghConfig
   , dir "_user" currentUser ]
 
 -- Login using RPX (see RPX development docs at https://rpxnow.com/docs)
@@ -442,7 +479,7 @@ loginRPXUser params = do
   if isNothing mtoken
      then do
        let url = baseUrl cfg ++ "/_login?destination=" ++
-                  (fromMaybe ref $ rDestination params)
+                  fromMaybe ref (rDestination params)
        if null (rpxDomain cfg)
           then error "rpx-domain is not set."
           else do
@@ -465,7 +502,7 @@ loginRPXUser params = do
        let email  = prop "verifiedEmail" uid
        user <- liftIO $ mkUser (fromMaybe userId email) (fromMaybe "" email) "none"
        updateGititState $ \s -> s { users = M.insert userId user (users s) }
-       key <- newSession (SessionData userId)
+       key <- newSession (sessionData userId)
        addCookie (MaxAge $ sessionTimeout cfg) (mkCookie "sid" (show key))
        see $ fromJust $ rDestination params
       where

@@ -63,13 +63,13 @@ import Network.Gitit.Cache (expireCachedFile, lookupCache, cacheContents)
 import Network.Gitit.ContentTransformer (showRawPage, showFileAsText, showPage,
         exportPage, showHighlightedSource, preview, applyPreCommitPlugins)
 import Network.Gitit.Page (readCategories)
-import Control.Exception (throwIO, catch, try)
+import qualified Control.Exception as E
 import System.FilePath
-import Prelude hiding (catch)
 import Network.Gitit.State
 import Text.XHtml hiding ( (</>), dir, method, password, rev )
 import qualified Text.XHtml as X ( method )
-import Data.List (intersperse, nub, sortBy, find, isPrefixOf, inits, sort)
+import Data.List (intercalate, intersperse, delete, nub, sortBy, find, isPrefixOf, inits, sort, (\\))
+import Data.List.Split (wordsBy)
 import Data.Maybe (fromMaybe, mapMaybe, isJust, catMaybes)
 import Data.Ord (comparing)
 import Data.Char (toLower, isSpace)
@@ -83,13 +83,14 @@ import Data.FileStore
 import System.Log.Logger (logM, Priority(..))
 
 handleAny :: Handler
-handleAny = uriRest $ \uri ->
+handleAny = withData $ \(params :: Params) -> uriRest $ \uri ->
   let path' = uriPath uri
   in  do fs <- getFileStore
+         let rev = pRevision params
          mimetype <- getMimeTypeForExtension
                       (takeExtension path')
-         res <- liftIO $ try
-                (retrieve fs path' Nothing :: IO B.ByteString)
+         res <- liftIO $ E.try
+                (retrieve fs path' rev :: IO B.ByteString)
          case res of
                 Right contents -> ignoreFilters >>  -- don't compress
                                   (ok $ setContentType mimetype $
@@ -141,10 +142,18 @@ createPage = do
                                     , pgTabs = []
                                     , pgTitle = "Create " ++ page ++ "?"
                                     } $
-                    p << [ stringToHtml ("There is no page '" ++ page ++
-                              "'.  You may create the page by "),
-                            anchor ! [href $ base' ++ "/_edit" ++ urlForPage page] <<
-                              "clicking here." ]
+                    (p << stringToHtml
+                        ("There is no page named '" ++ page ++ "'. You can:"))
+                        +++
+                    (unordList $
+                      [ anchor !
+                            [href $ base' ++ "/_edit" ++ urlForPage page] <<
+                              ("Create the page '" ++ page ++ "'")
+                      , anchor !
+                            [href $ base' ++ "/_search?" ++
+                                (urlEncodeVars [("patterns", page)])] <<
+                              ("Search for pages containing the text '" ++
+                                page ++ "'")])
 
 uploadForm :: Handler
 uploadForm = withData $ \(params :: Params) -> do
@@ -153,18 +162,18 @@ uploadForm = withData $ \(params :: Params) -> do
   let logMsg = pLogMsg params
   let upForm = form ! [X.method "post", enctype "multipart/form-data"] <<
        fieldset <<
-       [ p << [label << "File to upload:"
+       [ p << [label ! [thefor "file"] << "File to upload:"
               , br
               , afile "file" ! [value origPath] ]
-       , p << [ label << "Name on wiki, including extension"
+       , p << [ label ! [thefor "wikiname"] << "Name on wiki, including extension"
               , noscript << " (leave blank to use the same filename)"
               , stringToHtml ":"
               , br
               , textfield "wikiname" ! [value wikiname]
               , primHtmlChar "nbsp"
               , checkbox "overwrite" "yes"
-              , label << "Overwrite existing file" ]
-       , p << [ label << "Description of content or changes:"
+              , label ! [thefor "overwrite"] << "Overwrite existing file" ]
+       , p << [ label ! [thefor "logMsg"] << "Description of content or changes:"
               , br
               , textfield "logMsg" ! [size "60", value logMsg]
               , submit "upload" "Upload" ]
@@ -191,10 +200,10 @@ uploadFile = withData $ \(params :: Params) -> do
                         Just u  -> return (uUsername u, uEmail u)
   let overwrite = pOverwrite params
   fs <- getFileStore
-  exists <- liftIO $ catch (latest fs wikiname >> return True) $ \e ->
+  exists <- liftIO $ E.catch (latest fs wikiname >> return True) $ \e ->
                       if e == NotFound
                          then return False
-                         else throwIO e >> return True
+                         else E.throwIO e >> return True
   let inStaticDir = staticDir cfg `isPrefixOf` (repositoryPath cfg </> wikiname)
   let inTemplatesDir = templatesDir cfg `isPrefixOf` (repositoryPath cfg </> wikiname)
   let dirs' = splitDirectories $ takeDirectory wikiname
@@ -262,7 +271,7 @@ searchResults = withData $ \(params :: Params) -> do
   fs <- getFileStore
   matchLines <- if null patterns
                    then return []
-                   else liftIO $ catch (search fs SearchQuery{
+                   else liftIO $ E.catch (search fs SearchQuery{
                                                   queryPatterns = patterns
                                                 , queryWholeWords = True
                                                 , queryMatchAll = True
@@ -377,10 +386,12 @@ showHistory file page params =  do
 
 showActivity :: Handler
 showActivity = withData $ \(params :: Params) -> do
+  cfg <- getConfig
   currTime <- liftIO getCurrentTime
-  let oneMonthAgo = addUTCTime (-60 * 60 * 24 * 30) currTime
+  let defaultDaysAgo = fromIntegral (recentActivityDays cfg)
+  let daysAgo = addUTCTime (defaultDaysAgo * (-60) * 60 * 24) currTime
   let since = case pSince params of
-                   Nothing -> Just oneMonthAgo
+                   Nothing -> Just daysAgo
                    Just t  -> Just t
   let forUser = pForUser params
   fs <- getFileStore
@@ -392,14 +403,13 @@ showActivity = withData $ \(params :: Params) -> do
   let fileFromChange (Added f)    = f
       fileFromChange (Modified f) = f
       fileFromChange (Deleted f)  = f
-  let dropDotPage file = if isPageFile file
-                            then dropExtension file
-                            else file
+
   base' <- getWikiBase
-  let fileAnchor revis file =
-        anchor ! [href $ base' ++ "/_diff" ++ urlForPage file ++ "?to=" ++ revis] << file
-  let filesFor changes revis = intersperse (primHtmlChar "nbsp") $
-        map (fileAnchor revis . dropDotPage . fileFromChange) changes
+  let fileAnchor revis file = if isPageFile file
+        then anchor ! [href $ base' ++ "/_diff" ++ urlForPage (dropExtension file) ++ "?to=" ++ revis] << dropExtension file
+        else anchor ! [href $ base' ++ urlForPage file ++ "?revision=" ++ revis] << file
+  let filesFor changes revis = intersperse (stringToHtml " ") $
+        map (fileAnchor revis . fileFromChange) changes
   let heading = h1 << ("Recent changes by " ++ fromMaybe "all users" forUser)
   let revToListItem rev = li <<
         [ thespan ! [theclass "date"] << (show $ revDateTime rev)
@@ -454,17 +464,18 @@ showDiff file page params = do
                             -- immediately preceding revision
                             then Just $ revId $ upto !! 1
                             else Nothing
-  result' <- liftIO $ try $ getDiff fs file from' to
+  result' <- liftIO $ E.try $ getDiff fs file from' to
   case result' of
        Left NotFound  -> mzero
-       Left e         -> liftIO $ throwIO e
+       Left e         -> liftIO $ E.throwIO e
        Right htmlDiff -> formattedPage defaultPageLayout{
                                           pgPageName = page,
                                           pgRevision = from' `mplus` to,
                                           pgMessages = pMessages params,
                                           pgTabs = DiffTab :
                                                    pgTabs defaultPageLayout,
-                                          pgSelectedTab = DiffTab
+                                          pgSelectedTab = DiffTab,
+                                          pgTitle = page
                                           }
                                        htmlDiff
 
@@ -488,7 +499,7 @@ editPage' params = do
   let rev = pRevision params  -- if this is set, we're doing a revert
   fs <- getFileStore
   page <- getPage
-  let getRevisionAndText = catch
+  let getRevisionAndText = E.catch
         (do c <- liftIO $ retrieve fs (pathForPage page) rev
             -- even if pRevision is set, we return revId of latest
             -- saved version (because we're doing a revert and
@@ -498,7 +509,7 @@ editPage' params = do
             return (Just $ revId r, c))
         (\e -> if e == NotFound
                   then return (Nothing, "")
-                  else throwIO e)
+                  else E.throwIO e)
   (mbRev, raw) <- case pEditedText params of
                          Nothing -> liftIO getRevisionAndText
                          Just t  -> let r = if null (pSHA1 params)
@@ -523,7 +534,7 @@ editPage' params = do
                    , textarea ! (readonly ++ [cols "80", name "editedText",
                                   identifier "editedText"]) << raw
                    , br
-                   , label << "Description of changes:"
+                   , label ! [thefor "logMsg"] << "Description of changes:"
                    , br
                    , textfield "logMsg" ! (readonly ++ [value logMsg])
                    , submit "update" "Save"
@@ -561,11 +572,11 @@ confirmDelete = do
   fs <- getFileStore
   -- determine whether there is a corresponding page, and if not whether there
   -- is a corresponding file
-  pageTest <- liftIO $ try $ latest fs (pathForPage page)
+  pageTest <- liftIO $ E.try $ latest fs (pathForPage page)
   fileToDelete <- case pageTest of
                        Right _        -> return $ pathForPage page  -- a page
                        Left  NotFound -> do
-                         fileTest <- liftIO $ try $ latest fs page
+                         fileTest <- liftIO $ E.try $ latest fs page
                          case fileTest of
                               Right _       -> return page  -- a source file
                               Left NotFound -> return ""
@@ -599,7 +610,7 @@ deletePage = withData $ \(params :: Params) -> do
   if pConfirm params && (file == page || file == page <.> "page")
      then do
        fs <- getFileStore
-       liftIO $ delete fs file author descrip
+       liftIO $ Data.FileStore.delete fs file author descrip
        seeOther (base' ++ "/") $ toResponse $ p << "File deleted"
      else seeOther (base' ++ urlForPage page) $ toResponse $ p << "Not deleted"
 
@@ -630,12 +641,12 @@ updatePage = withData $ \(params :: Params) -> do
                                      return (Right ())
                        else do
                          expireCachedFile (pathForPage page) `mplus` return ()
-                         liftIO $ catch (modify fs (pathForPage page)
+                         liftIO $ E.catch (modify fs (pathForPage page)
                                             oldSHA1 (Author user email) logMsg
                                             editedText)
                                      (\e -> if e == Unchanged
                                                then return (Right ())
-                                               else throwIO e)
+                                               else E.throwIO e)
        case modifyRes of
             Right () -> seeOther (base' ++ urlForPage page) $ toResponse $ p << "Page updated"
             Left (MergeInfo mergedWithRev conflicts mergedText) -> do
@@ -674,8 +685,10 @@ fileListToHtml base' prefix files =
         li ! [theclass "page"  ] <<
           anchor ! [href $ base' ++ urlForPage (prefix ++ dropExtension f)] <<
             dropExtension f
-      fileLink (FSFile f) =
-        li ! [theclass "upload"] << anchor ! [href $ base' ++ urlForPage (prefix ++ f)] << f
+      fileLink (FSFile f) = li ! [theclass "upload"] << concatHtml
+        [ anchor ! [href $ base' ++ urlForPage (prefix ++ f)] << f
+        , anchor ! [href $ base' ++ "_delete" ++ urlForPage (prefix ++ f)] << "(delete)"
+        ]
       fileLink (FSDirectory f) =
         li ! [theclass "folder"] <<
           anchor ! [href $ base' ++ urlForPage (prefix ++ f) ++ "/"] << f
@@ -694,30 +707,44 @@ fileListToHtml base' prefix files =
 -- more sophisticated searching options to filestore.
 categoryPage :: Handler
 categoryPage = do
-  category <- getPath
+  path' <- getPath
   cfg <- getConfig
+  let pcategories = wordsBy (==',') path'
   let repoPath = repositoryPath cfg
-  let categoryDescription = "Category: " ++ category
+  let categoryDescription = "Category: " ++ (intercalate " + " pcategories)
   fs <- getFileStore
   files <- liftIO $ index fs
   let pages = filter (\f -> isPageFile f && not (isDiscussPageFile f)) files
   matches <- liftM catMaybes $
              forM pages $ \f -> do
                categories <- liftIO $ readCategories $ repoPath </> f
-               return $ if category `elem` categories
-                           then Just f
+               return $ if all ( `elem` categories) pcategories
+                           then Just (f, categories \\ pcategories)
                            else Nothing
   base' <- getWikiBase
   let toMatchListItem file = li <<
         [ anchor ! [href $ base' ++ urlForPage (dropExtension file)] << dropExtension file ]
-  let htmlMatches = ulist << map toMatchListItem matches
+  let toRemoveListItem cat = li << 
+        [ anchor ! [href $ base' ++
+        (if null (tail pcategories)
+         then "/_categories"
+         else "/_category" ++ urlForPage (intercalate "," $ Data.List.delete cat pcategories)) ]
+        << ("-" ++ cat) ]
+  let toAddListItem cat = li <<
+        [ anchor ! [href $ base' ++
+          "/_category" ++ urlForPage (path' ++ "," ++ cat) ]
+        << ("+" ++ cat) ]
+  let matchList = ulist << map toMatchListItem (fst $ unzip matches) +++
+                  thediv ! [ identifier "categoryList" ] <<
+                  ulist << (++) (map toAddListItem (nub $ concat $ snd $ unzip matches)) 
+                                (map toRemoveListItem pcategories) 
   formattedPage defaultPageLayout{
                   pgPageName = categoryDescription,
                   pgShowPageTools = False,
                   pgTabs = [],
                   pgScripts = ["search.js"],
                   pgTitle = categoryDescription }
-                htmlMatches
+                matchList
 
 categoryListPage :: Handler
 categoryListPage = do

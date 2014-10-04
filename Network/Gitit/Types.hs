@@ -21,7 +21,46 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 {- | Types for Gitit modules.
 -}
 
-module Network.Gitit.Types where
+module Network.Gitit.Types (
+                            PageType(..)
+                           , FileStoreType(..)
+                           , MathMethod(..)
+                           , AuthenticationLevel(..)
+                           , Config(..)
+                           , Page(..)
+                           , SessionKey
+                           -- we do not export SessionData constructors, in case we need to extend  SessionData with other data in the future
+                           , SessionData
+                           , sessionData
+                           , sessionDataGithubState
+                           , sessionUser
+                           , sessionGithubState
+                           , User(..)
+                           , Sessions(..)
+                           , Password(..)
+                           , GititState(..)
+                           , HasContext
+                           , modifyContext
+                           , getContext
+                           , ContentTransformer
+                           , Plugin(..)
+                           , PluginData(..)
+                           , PluginM
+                           , runPluginM
+                           , Context(..)
+                           , PageLayout(..)
+                           , Tab(..)
+                           , Recaptcha(..)
+                           , Params(..)
+                           , Command(..)
+                           , WikiState(..)
+                           , GititServerPart
+                           , Handler
+                           , fromEntities
+                           , GithubConfig
+                           , oAuth2
+                           , org
+                           , githubConfig) where
 
 import Control.Monad.Reader (ReaderT, runReaderT, mplus)
 import Control.Monad.State (StateT, runStateT, get, modify)
@@ -30,6 +69,7 @@ import System.Log.Logger (Priority(..))
 import Text.Pandoc.Definition (Pandoc)
 import Text.XHtml (Html)
 import qualified Data.Map as M
+import Data.Text (Text)
 import Data.List (intersect)
 import Data.Time (parseTime)
 import System.Locale (defaultTimeLocale)
@@ -37,8 +77,9 @@ import Data.FileStore.Types
 import Network.Gitit.Server
 import Text.HTML.TagSoup.Entity (lookupEntity)
 import Data.Char (isSpace)
+import Network.OAuth.OAuth2
 
-data PageType = Markdown | RST | LaTeX | HTML | Textile
+data PageType = Markdown | RST | LaTeX | HTML | Textile | Org | DocBook
                 deriving (Read, Show, Eq)
 
 data FileStoreType = Git | Darcs | Mercurial deriving Show
@@ -147,7 +188,12 @@ data Config = Config {
   -- | Directory to search for pandoc customizations
   pandocUserData       :: Maybe FilePath,
   -- | Filter HTML through xss-sanitize
-  xssSanitize          :: Bool
+  xssSanitize          :: Bool,
+  -- | The default number of days in the past to look for \"recent\" activity
+  recentActivityDays   :: Int,
+  -- | Github client data for authentication (id, secret, callback,
+  -- authorize endpoint, access token endpoint)
+  githubAuth           :: GithubConfig
   }
 
 -- | Data for rendering a wiki page.
@@ -165,8 +211,15 @@ data Page = Page {
 type SessionKey = Integer
 
 data SessionData = SessionData {
-  sessionUser :: String
+  sessionUser :: Maybe String,
+  sessionGithubState :: Maybe String
 } deriving (Read,Show,Eq)
+
+sessionData :: String -> SessionData
+sessionData user = SessionData (Just user) Nothing
+
+sessionDataGithubState  :: String -> SessionData
+sessionDataGithubState  githubState = SessionData Nothing (Just githubState)
 
 data Sessions a = Sessions {unsession::M.Map SessionKey a}
   deriving (Read,Show,Eq)
@@ -290,6 +343,7 @@ data Params = Params { pUsername     :: String
                      , pSessionKey   :: Maybe SessionKey
                      , pRecaptcha    :: Recaptcha
                      , pResetCode    :: String
+                     , pRedirect     :: Maybe Bool
                      }  deriving Show
 
 instance FromReqURI [String] where
@@ -341,6 +395,10 @@ instance FromData Params where
          rc <- look' "recaptcha_challenge_field" `mplus` return ""
          rr <- look' "recaptcha_response_field" `mplus` return ""
          rk <- look' "reset_code" `mplus` return ""
+         rd <- (look' "redirect" >>= \r -> return (case r of
+             "yes" -> Just True
+             "no" -> Just False
+             _ -> Nothing)) `mplus` return Nothing
          return   Params { pUsername     = un
                          , pPassword     = pw
                          , pPassword2    = p2
@@ -374,6 +432,7 @@ instance FromData Params where
                               recaptchaChallengeField = rc,
                               recaptchaResponseField = rr }
                          , pResetCode    = rk
+                         , pRedirect     = rd
                          }
 
 data Command = Command (Maybe String) deriving Show
@@ -408,3 +467,9 @@ fromEntities ('&':xs) =
 fromEntities (x:xs) = x : fromEntities xs
 fromEntities [] = []
 
+data GithubConfig = GithubConfig { oAuth2 :: OAuth2
+                                 , org :: Maybe Text
+                                 }
+
+githubConfig :: OAuth2 -> Maybe Text -> GithubConfig
+githubConfig = GithubConfig
